@@ -1,113 +1,106 @@
 from string import ascii_lowercase, ascii_uppercase, digits
-from typing import Union, Literal
-import zlib
+from typing import Union, Callable, IO
+import logging, base64, math, struct
 
+try:
+    import zlib
+except:
+    zlib = None
+    logging.exception("'zlib' wasn't found. Install it to use HugeMemory.")
 
-class Util:
-    """Contains various utility functions."""
-    def pbin(num : int, width=4):
-        """Turns a number into string form, then pads it to the specified amount of bits. Ex: pbin(1,4) -> '0001'"""
-        if isinstance(num, str):
-            num = int(num)
-        binary_str = bin(num)[2:]
-        padded_str = binary_str.zfill(width)
-        return padded_str
-
-    def decode(encoded_data : str):
-        """Decodes MassiveMemory strings into a list of bytes."""
-        alphabet = ascii_uppercase + ascii_lowercase + digits + "+/"
-        outp = [encoded_data[i:i + 3] for i in range(0, len(encoded_data), 3)]
-        outb = []
-        for i in outp:
-            bits = 0
-            for c in i[::-1]:
-                bits = bits + alphabet.index(c)
-                bits <<= 6
-            bits >>= 6
-            outb.append(bits)
-        return outb
-    def load(data : str):
-        """Returns a Memory object, with 'data' loaded into it. Intended ONLY for loading data copied directly from a MassiveMemory or MassMemory."""
-        massive = len(data) == 12288
-        if massive:
-            raw = Util.decode(data)
-            for i in range(4096-len(raw)):
-                raw.append(0)
-            mem = Memory(massive=True)
-            mem.raw = raw
-            return mem
-        else:
-            outp = [data[i:i + 2] for i in range(0, len(data), 2)]
-            raw = []
-            for i in outp:
-                raw.append(int('0x'+i.lower(),16))
-            for i in range(4096-len(raw)):
-                raw.append(0)
-            mem = Memory(massive=False)
-            mem.raw = raw
-            return mem
 class Memory:
+    """Base memory class; any memory. This class uses a list of integers (rather than bytes) as means of storing/processing data."""
     raw = []
     """The raw data in the memory. It is not recommended to use this directly."""
-    massive = True
-    """Whether the memory is a MassiveMemory or not. True unless set to False when initialized."""
-    def __init__(self,massive : bool=True) -> None:
-        """Creates a Memory instance. Use massive=False if you're using/going to use a MassMemory instead of a MassiveMemory."""
-        for i in range(4096):
-            self.raw.append(0)
-        self.massive = massive
-        return
+    size = 0
+    """Size of the memory (in bytes). This number is the number of addresses, not the total data."""
+    nbits = 0
+    """Bits of data at each address."""
+    __readable = 0
+    """Readability; Not Implemented"""
+    __writable = 0
+    """Writability; Not Implemented"""
 
-    def load_raw(self, data : list) -> None:
-        """Loads a list of bytes into this Memory object."""
-        if self.massive:
-            idx = 0
-            for i in data:
-                if i > 65535:
-                    raise Exception(f"Only 16-bit (or less) integers are allowed in a MassiveMemory [At byte #{idx}, byte = {i}]")
-                idx += 1
+    __encoder = None
+    """The encoding function to use; data -> memstring"""
+    __decoder = None
+    """The decoding function to use; memstring -> data"""
+
+    def __init__(self, size : int, nbits : int, encoder : Callable, decoder : Callable, init_data = None):
+        """You shouldn't use this class unless you're making your own memory type. Use MassMemory, MassiveMemory, etc instead.
+        :param int size: The size (number of addresses)
+        :param int nbits: The number of bits per address (must be a multiple of 8, and non-zero)
+        :param encoder: An encoding function to encode data into memstrings. See massMemoryEncode as an example
+        :param decoder: A decoder function to get data from a memstring. See massMemoryDecode as an example
+        :param init_data: Optional initial data. If it's a memstring, it's decoded using the provided decoder, otherwise it's assumed to just be raw data."""
+        self.size = size
+        self.nbits = nbits
+        self.__encoder = encoder
+        self.__decoder = decoder
+        if init_data:
+            if isinstance(init_data, str):
+                self.load(init_data)
+            else:
+                self.raw = init_data
+
+    def get(self, index : int) -> int:
+        """Get data at an index. Alternatively, use Memory[index]. Negative indexes allowed."""
+        if index >= self.size:
+            raise IndexError(f"{index} is greater than maximum of {self.size-1}.")
+        return self.raw[index]
+
+    def put(self, data : int, index: int) -> None:
+        """Put data at an index. Alternatively, use Memory[index] = data. Negative indexes allowed."""
+        if index >= self.size:
+            raise IndexError(f"{index} is greater than maximum of {self.size-1}.")
+        self.raw[index] = data
+
+    def load(self, text : str) -> None:
+        """Load a memory string into this memory (overwrites existing contents)."""
+        if not self.__decoder:
+            raise NotImplementedError("A decoding function was not specified.")
+        self.raw = self.__decoder(text)
+
+    def save(self) -> str:
+        """Save memory contents as a memstring."""
+        if not self.__encoder:
+            raise NotImplementedError("An encoding function was not specified.")
+        return self.__encoder(self.raw)
+    
+    def dumpfile(self, file : Union[str, IO[bytes]]) -> None:
+        """Dump memory data to a file or buffer"""
+        if isinstance(file, str):
+            with open(file, 'wb') as f:
+                for v in self.raw:
+                    f.write(v.to_bytes(math.ceil(self.nbits / 8), "little"))
         else:
-            idx = 0
-            for i in data:
-                if i > 255:
-                    raise Exception(f"Only 8-bit (or less) integers are allowed in a MassMemory [At byte #{idx}, byte = {i}]")
-                idx += 1
+            if file.seekable():
+                file.seek(0)
+            for v in self.raw:
+                file.write(v.to_bytes(math.ceil(self.nbits / 8), "little"))
+            
 
-        self.raw = data
-    def pack(self) -> str: 
-        """Packs your code into a string to be pasted into a memory."""
-        if self.massive:
-            alphabet = ascii_uppercase + ascii_lowercase + digits + "+/"
-
-            instructions = ""
-            for i in self.raw:
-                hx = hex(i)[2:]
-                instructions += ("0"*(4-len(hx))) + hx + " "
-            instructions = instructions[:-1]
-            instruction_bytes = bytes.fromhex(instructions)
-
-            output = ""
-            for b1, b2 in zip(instruction_bytes[::2], instruction_bytes[1::2]):
-                bits = b1 << 8 | b2
-                for _ in range(3):
-                    output += alphabet[bits & 0x3f]
-                    bits >>= 6
-            return output + ("A" * (12288-len(output)))
+    def loadfile(self, file : Union[str, IO[bytes]]) -> None:
+        """Load memory data from a file or buffer. Contents are truncated to fit"""
+        if isinstance(file, str):
+            with open(file, 'rb') as f:
+                for i in range(self.size):
+                    self.raw[i] = int.from_bytes(f.read(math.ceil(self.nbits / 8)), "little")
         else:
-            rawout = ""
-            for i in self.raw:
-                hx = hex(i)[2:]
-                rawout += ("0"*(2-len(hx))) + hx
-            return rawout.upper()
-    def __getitem__(self, key : str or int):
+            if file.seekable():
+                file.seek(0)
+            for i in range(self.size):
+                    self.raw[i] = int.from_bytes(file.read(math.ceil(self.nbits / 8)), "little")
+
+    def __getitem__(self, key : Union[str, int]) -> int:
+        """Integers and bin strings can be used interchangeably for the index."""
         if isinstance(key,str):
             if key.startswith('0b'):
                 key = key[2:]
             key = int(key,2)
-        if key > 4095:
-            raise Exception("Key must not be greater than 4095.")
         return self.raw[key]
-    def __setitem__(self, key : str or int, value : str or int):
+    def __setitem__(self, key : Union[str, int], value : Union[str, int]) -> None:
+        """Integers and bin strings can be used for both parameters interchangeably."""
         if isinstance(key,str):
             if key.startswith('0b'):
                 key = key[2:]
@@ -116,16 +109,96 @@ class Memory:
             if value.startswith('0b'):
                 value = value[2:]
             value = int(value,2)
-        if self.massive:
-            if value > 65535:
-                raise Exception("Value must not be greater than 65535 for a MassiveMemory.")
-        else:
-            if value > 255:
-                raise Exception("Value must not be greater than 255 for a MassMemory.")
         self.raw[key] = value
 
-class Premade:
-    """Functions to load pre-made 'programs' to a Memory instance, allowing you to do subtraction, addition, etc.. using a MassiveMemory."""
+def load(data : str) -> Memory:
+    """Load a memory string. Automatically detects memory type. Will raise an exception for invalid memstrings.
+    If you already know what type of memory the string belongs to, you should use MassMemory(memstring), MassiveMemory(memstring), etc"""
+    if len(data) == 8192:
+        target = MassMemory
+    elif len(data) == 12288:
+        target = MassiveMemory
+    else:
+        target = HugeMemory
+    return target(data)
+
+def massMemoryEncode(data: list[int]) -> str:
+    """Encodes data into a MassMemory memstring."""
+    return ''.join(f'{i:02X}' for i in data)
+
+def massMemoryDecode(text: str) -> list[int]:
+    """Decodes a MassMemory memstring into data."""
+    return [int(text[i:i+2], 16) for i in range(0, len(text), 2)]
+
+def massiveMemoryEncode(data: list[int]) -> str:
+    """Encodes data into a MassiveMemory memstring."""
+    alphabet = ascii_uppercase + ascii_lowercase + digits + "+/"
+    hex_str = ''.join(f'{i:04x}' for i in data)
+    instruction_bytes = bytes.fromhex(hex_str)
+
+    output_chars = []
+    for b1, b2 in zip(instruction_bytes[::2], instruction_bytes[1::2]):
+        bits = (b1 << 8) | b2
+        output_chars.extend(alphabet[(bits >> (6 * i)) & 0x3F] for i in range(3))
+    
+    output = ''.join(output_chars)
+    return output.ljust(12288, 'A')
+
+def massiveMemoryDecode(text: str) -> list[int]:
+    """Decodes a MassiveMemory memstring into data."""
+    alphabet = ascii_uppercase + ascii_lowercase + digits + "+/"
+    index_table = {c: i for i, c in enumerate(alphabet)}
+
+    outb = []
+    for i in range(0, len(text), 3):
+        group = text[i:i + 3]
+        bits = 0
+        for c in group:
+            bits = (bits << 6) | index_table[c]
+        outb.append(bits)
+    return outb
+
+def hugeMemoryEncode(data: list[int]) -> str:
+    """Encodes data into a HugeMemory memstring."""
+    packed = struct.pack(f'<{len(data)}H', *data)  # Little-endian 16-bit unsigned ints
+    compressed = zlib.compress(packed)[2:-4]       # Strip zlib headers and checksum (raw deflate)
+    return base64.b64encode(compressed).decode('ascii')
+
+def hugeMemoryDecode(text: str) -> list[int]:
+    """Decodes a HugeMemory memstring into data."""
+    rs = zlib.decompress(base64.b64decode(text), wbits=-zlib.MAX_WBITS)
+    return list(struct.unpack(f'<{len(rs)//2}H', rs))
+
+class MassMemory(Memory):
+    """MassMemory; 8 bit addresses with 8 bit data."""
+    size = 2**8
+
+    def __init__(self, data : Union[str, list[int], None]=None):
+        """
+        :param data: Optional initial data. A memstring can be provided, or just data. 
+        """
+        super().__init__(2**8, 8, massMemoryEncode, massMemoryDecode, init_data=data)
+
+class MassiveMemory(Memory):
+    """MassiveMemory; 12 bit addresses with 16 bit data."""
+    size = 2**12
+    def __init__(self, data : Union[str, list[int], None]=None):
+        """
+        :param data: Optional initial data. A memstring can be provided, or just data. 
+        """
+        super().__init__(2**12, 16, massiveMemoryEncode, massiveMemoryDecode, init_data=data)
+
+class HugeMemory(Memory):
+    """HugeMemory; 16 bit addresses with 16 bit data."""
+    size = 2**16
+    def __init__(self, data : Union[str, list[int], None]=None):
+        """
+        :param data: Optional initial data. A memstring can be provided, or just data. 
+        """
+        super().__init__(2**16, 16, hugeMemoryEncode, hugeMemoryDecode, init_data=data)
+
+class ROMs:
+    """Pre-defined ROM loaders. These load a pre-defined ROM onto an existing Memory."""
     def divider(mem_instance : Memory) -> None:
         """6-bit divider (0 / 0 = 0). Outputs are rounded."""
         if not mem_instance.massive:
@@ -172,11 +245,16 @@ class Premade:
             else:
                 fp[i] = param1-param2
 
-    def displaydriver(mem_instance : Memory) -> None:
-        """For a 4 digit seven segment display (displays the number fed into the input). Outputs 4 4-bit numbers, each being a digit of the number to display."""
+    def doubledabble(mem_instance: Memory) -> None:
+        """Outputs the input number's digits as 4 4-bit numbers. Example: 1024 -> 4 2 0 1"""
         if not mem_instance.massive:
             raise Exception("Memory is not a MassiveMemory")
         fp = mem_instance
         for i in range(4096):
-            st = ('0' * (4-len(str(i)))) + str(i)
-            fp[i] = Util.pbin(st[3]) + Util.pbin(st[2]) + Util.pbin(st[1]) + Util.pbin(st[0])
+            st = f'{i:04}'  # 4-character decimal string, zero-padded
+            fp[i] = (
+                f'{int(st[3]):04b}' +
+                f'{int(st[2]):04b}' +
+                f'{int(st[1]):04b}' +
+                f'{int(st[0]):04b}'
+            )
